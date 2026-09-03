@@ -17,6 +17,8 @@ GOFLAGS ?=
 
 ifeq ($(OS),Windows_NT)
     DETECTED_OS := windows
+    SHELL := C:/Program Files/Git/bin/bash.exe
+   	.SHELLFLAGS := -c
 else
     DETECTED_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 endif

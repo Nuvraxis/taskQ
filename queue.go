@@ -9,12 +9,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// Queue binds a Broker to a queue name and a payload type T.
 type Queue[T any] struct {
 	broker Broker
 	name   string
 	cfg    queueConfig
 }
 
+// NewQueue creates a Queue bound to broker and the given queue name. opts
+// set defaults — such as WithDefaultMaxRetry — applied to every task
+// enqueued through it.
 func NewQueue[T any](broker Broker, name string, opts ...QueueOption) *Queue[T] {
 	cfg := queueConfig{defaultMaxRetry: 0}
 	for _, opt := range opts {
@@ -44,7 +48,6 @@ func (q *Queue[T]) Enqueue(ctx context.Context, payload T, opts ...EnqueueOption
 	})
 }
 
-// decode turns a raw Message back into a Task[T].
 func decode[T any](msg Message) (Task[T], error) {
 	var payload T
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {

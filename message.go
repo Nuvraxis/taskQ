@@ -2,6 +2,9 @@ package taskq
 
 import "time"
 
+// Message is the broker-level envelope. Brokers only ever see this — they
+// don't know about T. Task[T] is decoded from Message above the Broker
+// boundary.
 type Message struct {
 	ID         string    `json:"id"`
 	Queue      string    `json:"queue"`

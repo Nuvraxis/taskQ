@@ -19,12 +19,15 @@ type Broker struct {
 
 var _ taskq.Broker = (*Broker)(nil)
 
+// New returns an empty, ready-to-use in-memory Broker.
 func New() *Broker {
 	b := &Broker{queues: make(map[string][]taskq.Message)}
 	b.cond = sync.NewCond(&b.mu)
 	return b
 }
 
+// Enqueue appends msg to its queue and wakes any goroutine blocked in
+// Dequeue on that queue.
 func (b *Broker) Enqueue(ctx context.Context, msg taskq.Message) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

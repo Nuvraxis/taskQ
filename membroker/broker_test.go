@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Nuvraxis/taskQ"
+	taskq "github.com/Nuvraxis/taskQ"
 )
 
 func TestEnqueueDequeue_Roundtrip(t *testing.T) {

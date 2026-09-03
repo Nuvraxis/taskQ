@@ -2,6 +2,8 @@ package taskq
 
 import "time"
 
+// Task is what Handler[T] actually receives: a Message with Payload
+// decoded into T.
 type Task[T any] struct {
 	ID         string    `json:"id"`
 	Queue      string    `json:"queue"`
