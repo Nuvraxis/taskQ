@@ -1,0 +1,175 @@
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: "1.26.x"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build / vet / tidy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: go build (compile every package)
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt check
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go.mod/go.sum tidy check
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || {
+            echo "::error::go.mod/go.sum are not tidy — run 'go mod tidy' and commit the result"
+            exit 1
+          }
+
+  test:
+    name: test -short (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # -short assumes redisbroker/pgbroker gate their live-service tests
+      # behind testing.Short(). That's the convention this workflow relies
+      # on to keep macOS/Windows green — see note below the code.
+      - run: go test -short ./...
+
+  race:
+    name: race detector (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # windows-latest deliberately excluded: -race needs CGO_ENABLED=1 +
+      # a working C toolchain, and GitHub's windows-latest image has had
+      # mingw-w64 missing/broken across various runner-image revisions —
+      # same underlying issue as the Windows caveat in the Makefile.
+      - env:
+          CGO_ENABLED: 1
+        run: go test -race -short ./...
+
+  conformance:
+    name: taskqtest conformance suite
+    runs-on: ubuntu-latest   # service containers only run on Linux runners
+    needs: build
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: taskq
+          POSTGRES_PASSWORD: taskq
+          POSTGRES_DB: taskq_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U taskq"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TASKQ_REDIS_ADDR: localhost:6379
+      TASKQ_POSTGRES_DSN: postgres://taskq:taskq@localhost:5432/taskq_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # Mirrors `make test-conformance`. Fails until membroker/,
+      # redisbroker/, pgbroker/, taskqtest/ exist per the build order —
+      # that's expected, not a workflow bug, until phases 3–4 land.
+      - run: go test -run TestConformance -v ./taskqtest/... ./membroker/... ./redisbroker/... ./pgbroker/...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest   # golangci-lint v2 line
+          args: --timeout=5m
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  api-compat:
+    name: API compatibility report (informational)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: build
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go install golang.org/x/exp/cmd/gorelease@latest
+      - name: report API diff vs main
+        continue-on-error: true
+        run: |
+          echo "### API compatibility report" >> "$GITHUB_STEP_SUMMARY"
+          gorelease >> "$GITHUB_STEP_SUMMARY" 2>&1 || true

@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------
+# Go
+# ---------------------------------------------------------------------
+# Compiled binaries / build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Output of `go build` when it lands in the tree (e.g. cmd.exe, cmd/cmd)
+/cmd/cmd
+/cmd/cmd.exe
+
+# Go workspace file (machine-local)
+go.work
+go.work.sum
+
+# Dependency vendor dir (uncomment if you don't vendor)
+# vendor/
+
+# ---------------------------------------------------------------------
+# Test / coverage artifacts (see Makefile: cover, bench)
+# ---------------------------------------------------------------------
+coverage.out
+coverage.html
+*.cover
+*.prof
+cpu.out
+mem.out
+
+# ---------------------------------------------------------------------
+# IDE / editor
+# ---------------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------------
+# OS cruft
+# ---------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---------------------------------------------------------------------
+# Env / secrets
+# ---------------------------------------------------------------------
+.env
+.env.*
+!.env.example

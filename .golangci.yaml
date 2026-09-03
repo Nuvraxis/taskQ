@@ -1,0 +1,44 @@
+# .golangci.yml
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck   # v2 merged gosimple + stylecheck into this one
+    - unused
+    - revive
+    - gocritic
+    - misspell
+    - unconvert
+    - bodyclose
+    - noctx
+    - errorlint
+  settings:
+    revive:
+      rules:
+        - name: exported   # public API surface — exported identifiers need doc comments
+          disabled: false
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/Nuvraxis/taskQ
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
