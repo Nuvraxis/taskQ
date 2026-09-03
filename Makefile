@@ -74,7 +74,7 @@ endif
 
 .PHONY: test
 test:
-	$(GO) test ./...
+	$(GO) test -v ./...
 
 .PHONY: test-race
 test-race:
