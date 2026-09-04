@@ -30,3 +30,28 @@ func WithDefaultMaxRetry(n int) QueueOption {
 		c.defaultMaxRetry = n
 	}
 }
+
+// PoolOption configures a Pool[T] at construction time.
+type PoolOption func(*poolConfig)
+
+type poolConfig struct {
+	concurrency int
+	backoff     BackoffStrategy
+}
+
+// WithConcurrency sets the number of worker goroutines a Pool runs
+// concurrently. Values less than 1 are treated as 1.
+func WithConcurrency(n int) PoolOption {
+	return func(c *poolConfig) {
+		if n < 1 {
+			n = 1
+		}
+		c.concurrency = n
+	}
+}
+
+// WithBackoffStrategy overrides the default backoff strategy used to space
+// out redeliveries after a failed Handler call.
+func WithBackoffStrategy(s BackoffStrategy) PoolOption {
+	return func(c *poolConfig) { c.backoff = s }
+}
