@@ -20,11 +20,13 @@ taskQ is early and evolving. What's shipping today:
 
 - ✅ Core types and the `Broker` contract
 - ✅ [`membroker`](membroker/) — an in-memory broker for local dev and tests
-- 🚧 Redis and Postgres brokers, a conformance test suite, and a built-in
-  worker pool are planned (you'll see them referenced in the `Makefile` and
-  CI). Until the worker pool lands, consuming means calling the `Broker`
-  directly — the [examples](examples/membroker/) show a ~30-line loop that
-  does exactly that.
+- ✅ [`redisbroker`](redisbroker/) — a Redis Streams broker (consumer groups,
+  `ReceiptHandle`-based Ack/Nack); live-Redis tests are gated behind `-short`
+- 🚧 A Postgres broker, a conformance test suite, and a built-in worker pool
+  are planned (you'll see them referenced in the `Makefile` and CI). Until the
+  worker pool lands, consuming means calling the `Broker` directly — the
+  [examples](examples/) show a ~30-line loop (and a reusable `Pool[T]`) that
+  do exactly that.
 
 ## Install
 
@@ -111,13 +113,21 @@ func main() {
 }
 ```
 
-See [`examples/membroker`](examples/membroker/) for complete, runnable
-programs — including a worker pool with exponential-backoff retries:
+See [`examples/`](examples/) for complete, runnable programs — including a
+worker pool with exponential-backoff retries. The in-memory set needs no
+setup; the Redis set needs a running Redis (see its
+[README](examples/redisbroker/)):
 
 ```sh
+# in-memory (zero setup)
 go run ./examples/membroker/basic
 go run ./examples/membroker/retry
 go run ./examples/membroker/pool
+
+# Redis Streams (needs Redis on localhost:6379, or set TASKQ_REDIS_ADDR)
+go run ./examples/redisbroker/basic
+go run ./examples/redisbroker/retry
+go run ./examples/redisbroker/pool
 ```
 
 ## In-memory broker
@@ -154,13 +164,14 @@ make fmt       # gofmt -l -w .
 make lint      # golangci-lint run
 ```
 
-Run the examples with `go run` — or `make run EX=<path>` (see
-[`examples/membroker`](examples/membroker/)):
+Run the examples with `go run` — or `make run EX=<path>`. The `membroker/*`
+examples need no setup; the `redisbroker/*` examples need a running Redis
+(`make deps-up`, or `docker run --rm -p 6379:6379 redis:7`). See
+[`examples/`](examples/):
 
 ```sh
-go run ./examples/membroker/basic     # or: make run EX=membroker/basic
-go run ./examples/membroker/retry     # or: make run EX=membroker/retry
-go run ./examples/membroker/pool      # or: make run EX=membroker/pool
+go run ./examples/membroker/pool       # or: make run EX=membroker/pool
+go run ./examples/redisbroker/pool     # or: make run EX=redisbroker/pool
 ```
 
 CI runs build/vet/tidy, `go test -short`, the race detector, `golangci-lint`,
