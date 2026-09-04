@@ -112,11 +112,12 @@ func main() {
 ```
 
 See [`examples/membroker`](examples/membroker/) for complete, runnable
-programs — including a worker pool and full retry handling:
+programs — including a worker pool with exponential-backoff retries:
 
 ```sh
 go run ./examples/membroker/basic
 go run ./examples/membroker/retry
+go run ./examples/membroker/pool
 ```
 
 ## In-memory broker
@@ -159,6 +160,7 @@ Run the examples with `go run` — or `make run EX=<path>` (see
 ```sh
 go run ./examples/membroker/basic     # or: make run EX=membroker/basic
 go run ./examples/membroker/retry     # or: make run EX=membroker/retry
+go run ./examples/membroker/pool      # or: make run EX=membroker/pool
 ```
 
 CI runs build/vet/tidy, `go test -short`, the race detector, `golangci-lint`,
