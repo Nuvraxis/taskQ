@@ -23,11 +23,16 @@ taskQ is early and evolving. What's shipping today:
 - ✅ [`membroker`](membroker/) — an in-memory broker for local dev and tests
 - ✅ [`redisbroker`](redisbroker/) — a Redis Streams broker (consumer groups,
   `ReceiptHandle`-based Ack/Nack); live-Redis tests are gated behind `-short`
+- ✅ [`pgbroker`](pgbroker/) — a Postgres broker (`SELECT … FOR UPDATE SKIP
+  LOCKED`, lease-based visibility timeout with crash recovery, LISTEN/NOTIFY);
+  live-Postgres tests are gated behind `-short`
 - ✅ `Pool[T]` — a concurrent worker pool (configurable concurrency + backoff)
   and `Middleware[T]` composition (`Chain`, `LoggingMiddleware`,
   `RecoveryMiddleware`, plus OpenTelemetry tracing in [`otelmw`](otelmw/))
-- 🚧 A Postgres broker and a shared conformance test suite are still planned
-  (you'll see them referenced in the `Makefile` and CI).
+- ✅ [`taskqtest`](taskqtest/) — one shared conformance suite that all three
+  brokers pass, so backends stay interchangeable
+- 🚧 Remaining polish: Redis crash-recovery (XCLAIM) and richer Pool
+  Ack/Nack observability — see the code's Phase-5 notes.
 
 ## Install
 
@@ -171,7 +176,7 @@ handler := taskq.Chain[EmailJob](
 
 See [`examples/`](examples/) for complete, runnable programs — the worker pool,
 middleware, and exponential-backoff retries. The in-memory set needs no setup;
-the Redis set needs a running Redis (see its [README](examples/redisbroker/)):
+the Redis and Postgres sets need a running server (see each backend's README):
 
 ```sh
 # in-memory (zero setup)
@@ -184,6 +189,10 @@ go run ./examples/membroker/middleware
 go run ./examples/redisbroker/basic
 go run ./examples/redisbroker/retry
 go run ./examples/redisbroker/pool
+
+# Postgres (needs Postgres on localhost:5432, or set TASKQ_POSTGRES_DSN)
+go run ./examples/pgbroker/basic
+go run ./examples/pgbroker/pool
 ```
 
 ## In-memory broker
@@ -206,6 +215,76 @@ Characteristics:
 - **`Close`** unblocks pending `Dequeue` calls (they return
   `taskq.ErrQueueClosed`) but lets already-buffered messages drain first.
 
+## Redis broker
+
+`redisbroker` maps each queue to a Redis Stream and reads through a consumer
+group, so `Ack`/`Nack` target the exact entry via `ReceiptHandle`. You pass a
+`*redis.Client` (which the broker never closes) and a running Redis:
+
+```go
+client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+defer client.Close()
+
+broker := redisbroker.New(client, redisbroker.WithConsumerGroup("workers"))
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `WithKeyPrefix(p)` | `"taskq:"` | Prefix for stream keys — namespacing on a shared Redis. |
+| `WithConsumerGroup(name)` | `"taskq-workers"` | Consumer group; brokers sharing it compete for a stream's entries. |
+| `WithConsumerName(name)` | random UUID | This consumer's identity within the group (matters for future XCLAIM recovery). |
+| `WithBlockTimeout(d)` | `5s` | How long one `XREADGROUP` blocks before `Dequeue` re-checks the context. |
+
+There's no `Close()`/`ErrQueueClosed`: cancel the context to stop a consumer.
+Crash safety is partial today — an unacked entry stays in the group's Pending
+Entries List, but automatic reclaim (XCLAIM) is not implemented yet.
+
+## Postgres broker
+
+`pgbroker` stores messages in one `taskq_messages` table and dequeues with
+`SELECT … FOR UPDATE SKIP LOCKED`, so many workers pull concurrently without
+stepping on each other. A claimed row is hidden by a **lease** (visibility
+timeout) until it's Acked or the lease expires — which is how it recovers a
+crashed worker's message, with no separate reaper. `Dequeue` blocks on
+`LISTEN/NOTIFY`, falling back to polling.
+
+### Setup
+
+pgbroker takes a caller-owned `*pgxpool.Pool` (it never closes it) and needs
+its table to exist — run [`pgbroker/schema.sql`](pgbroker/schema.sql) once
+(all `CREATE … IF NOT EXISTS`); there's no migration tooling yet:
+
+```go
+pool, err := pgxpool.New(ctx, os.Getenv("TASKQ_POSTGRES_DSN"))
+if err != nil { /* ... */ }
+defer pool.Close()
+
+// once per database, e.g. `psql -f pgbroker/schema.sql`
+broker := pgbroker.New(pool, pgbroker.WithLeaseDuration(60*time.Second))
+```
+
+Start a throwaway Postgres with:
+
+```sh
+docker run --rm -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+```
+
+### Config
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `WithLeaseDuration(d)` | `30s` | Visibility timeout — how long a claimed message stays invisible before its lease expires and it's redelivered. Set it comfortably above your handler's worst-case runtime, or an in-flight message gets redelivered to a second worker. |
+| `WithPollInterval(d)` | `200ms` | Ceiling on `Dequeue` wake-up latency — the fallback when a `NOTIFY` is missed or never sent (e.g. a lease expiring with no new Enqueue to trigger one). |
+| `WithNotifyChannel(name)` | `"taskq_new_message"` | Postgres `NOTIFY` channel. It's cluster-wide, not table-scoped, so set a distinct name if multiple taskQ deployments share one database. |
+| `WithQueuePrefix(prefix)` | `""` | Namespaces queue names at the storage layer (every row carries `prefix+queue`). Mainly for tests sharing one database; the `Message.Queue` returned to callers is always the unprefixed name. |
+
+### Notes
+
+- **No `Close()`/`ErrQueueClosed`** — cancel the context to stop a consumer or `Pool.Run` (same as redisbroker).
+- **Crash recovery is built in** — an expired lease makes the row claimable again on the next `Dequeue`; no reaper process required.
+- **PgBouncer** in transaction-pooling mode doesn't forward `LISTEN/NOTIFY`, so every wake-up degrades to the poll interval (correctness is unaffected — only latency).
+- **Admin methods** beyond the `Broker` interface: `QueueDepth`, `QueueDepthAvailable`, `PeekMessages`, `ReapExpiredLease`, `PurgeQueue`, `ListQueues`, `PurgeAll` — for monitoring and cleanup.
+
 ## Development
 
 Common tasks are wrapped in the [`Makefile`](Makefile) (POSIX-shell first; on
@@ -221,13 +300,14 @@ make lint      # golangci-lint run
 ```
 
 Run the examples with `go run` — or `make run EX=<path>`. The `membroker/*`
-examples need no setup; the `redisbroker/*` examples need a running Redis
-(`make deps-up`, or `docker run --rm -p 6379:6379 redis:7`). See
-[`examples/`](examples/):
+examples need no setup; `redisbroker/*` needs a running Redis and `pgbroker/*`
+a running Postgres (`make deps-up`, or the `docker run` commands in each
+backend's README). See [`examples/`](examples/):
 
 ```sh
 go run ./examples/membroker/pool       # or: make run EX=membroker/pool
 go run ./examples/redisbroker/pool     # or: make run EX=redisbroker/pool
+go run ./examples/pgbroker/pool        # or: make run EX=pgbroker/pool
 ```
 
 CI runs build/vet/tidy, `go test -short`, the race detector, `golangci-lint`,
