@@ -211,7 +211,12 @@ func (b *Broker) Nack(ctx context.Context, msg taskq.Message, cause error) error
 	if err != nil {
 		return fmt.Errorf("pgbroker: nack: begin: %w", err)
 	}
-	defer tx.Rollback(ctx) // no-op once Commit succeeds
+	defer func(tx pgx.Tx, ctx context.Context) {
+		err := tx.Rollback(ctx)
+		if err != nil {
+			return
+		}
+	}(tx, ctx) // no-op once Commit succeeds
 
 	qtx := b.q.WithTx(tx)
 
