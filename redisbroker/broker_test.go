@@ -190,3 +190,78 @@ func TestNack_AssignsNewReceiptHandle(t *testing.T) {
 		t.Errorf("Attempts = %d, want 1 (Nack must persist the caller's count)", redelivered.Attempts)
 	}
 }
+
+// TestDequeue_ReclaimsStaleEntry exercises XAUTOCLAIM-based crash recovery:
+// a message dequeued by one consumer, never Acked or Nacked (simulating a
+// crash), sitting past its consumer group's Pending Entries List should
+// become redeliverable — to a *different* consumer — once claimMinIdle
+// elapses, with no separate reaper process and no explicit XCLAIM call
+// from the caller. Mirrors pgbroker's TestDequeue_RedeliversAfterLeaseExpires.
+func TestDequeue_ReclaimsStaleEntry(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+
+	queue := "test-" + uuid.NewString()
+	const minIdle = 300 * time.Millisecond
+
+	// Two distinct consumer identities on the same queue/group, standing
+	// in for two separate worker processes — the realistic crash scenario
+	// is a *different* consumer reclaiming an abandoned entry, not the
+	// same one picking its own message back up.
+	crashed := New(client, WithConsumerName("crashed-"+uuid.NewString()), WithClaimMinIdle(minIdle))
+	reclaimer := New(client, WithConsumerName("reclaimer-"+uuid.NewString()), WithClaimMinIdle(minIdle))
+
+	key := crashed.streamKey(queue)
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = client.Del(cctx, key)
+	})
+
+	msg := newMessage(queue, "will-be-abandoned")
+	if err := crashed.Enqueue(ctx, msg); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	first, err := crashed.Dequeue(ctx, queue)
+	if err != nil {
+		t.Fatalf("first Dequeue (about-to-crash consumer): %v", err)
+	}
+	if first.ID != msg.ID {
+		t.Fatalf("got %q, want %q", first.ID, msg.ID)
+	}
+	// Neither Ack nor Nack from here — "crashed" never gets the chance.
+
+	// Immediately after — well before minIdle elapses — there's nothing
+	// eligible to reclaim and nothing new on the stream, so Dequeue should
+	// still be blocking, not handing the entry to a second consumer early.
+	tooSoonCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	if _, err := reclaimer.Dequeue(tooSoonCtx, queue); err == nil {
+		cancel()
+		t.Fatal("Dequeue reclaimed the entry before claimMinIdle elapsed")
+	}
+	cancel()
+
+	// Once minIdle has passed, a Dequeue call from a different consumer
+	// should reclaim it via XAUTOCLAIM.
+	waitCtx, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel2()
+	reclaimed, err := reclaimer.Dequeue(waitCtx, queue)
+	if err != nil {
+		t.Fatalf("Dequeue after claimMinIdle elapsed: %v", err)
+	}
+	if reclaimed.ID != msg.ID {
+		t.Errorf("reclaimed ID = %q, want %q", reclaimed.ID, msg.ID)
+	}
+	if reclaimed.ReceiptHandle != first.ReceiptHandle {
+		t.Errorf("ReceiptHandle changed after reclaim (%q -> %q); XAUTOCLAIM reassigns ownership of the same stream entry, unlike Nack which creates a new one",
+			first.ReceiptHandle, reclaimed.ReceiptHandle)
+	}
+
+	// The reclaimed message is now this consumer's responsibility — Ack it
+	// so the stream is left clean for the cleanup Del above (harmless
+	// either way, but keeps intent explicit).
+	if err := reclaimer.Ack(ctx, *reclaimed); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+}

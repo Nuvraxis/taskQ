@@ -1,8 +1,3 @@
-// Package redisbroker implements taskq.Broker on Redis Streams. Each queue
-// maps to one stream (keyPrefix + queue name); Dequeue reads through a
-// consumer group so Ack/Nack can target the exact entry via XACK/XDEL, and
-// so a crashed consumer's unacknowledged entries remain visible in the
-// group's Pending Entries List for future reclaiming (XCLAIM/XAUTOCLAIM
 package redisbroker
 
 import (
@@ -65,8 +60,10 @@ func (b *Broker) Enqueue(ctx context.Context, msg taskq.Message) error {
 
 // Dequeue reads one message for queue via the configured consumer group,
 // creating the group (and stream, if needed) on first use for that queue.
-// It blocks in cfg.blockTimeout increments, re-checking ctx between reads,
-// until a message arrives or ctx is done.
+// Each loop iteration first attempts to reclaim one stale pending entry
+// (see tryClaimStale) before falling back to XREADGROUP for a genuinely
+// new one; it blocks in cfg.blockTimeout increments, re-checking ctx
+// between reads, until a message arrives or ctx is done.
 func (b *Broker) Dequeue(ctx context.Context, queue string) (*taskq.Message, error) {
 	key := b.streamKey(queue)
 	if err := b.ensureGroup(ctx, key); err != nil {
@@ -74,6 +71,14 @@ func (b *Broker) Dequeue(ctx context.Context, queue string) (*taskq.Message, err
 	}
 
 	for {
+		claimed, err := b.tryClaimStale(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if claimed != nil {
+			return claimed, nil
+		}
+
 		res, err := b.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    b.cfg.consumerGroup,
 			Consumer: b.cfg.consumerName,
@@ -87,7 +92,7 @@ func (b *Broker) Dequeue(ctx context.Context, queue string) (*taskq.Message, err
 				return nil, ctx.Err()
 			}
 			if errors.Is(err, redis.Nil) {
-				continue // BLOCK elapsed with nothing new — loop, re-check ctx
+				continue // BLOCK elapsed with nothing new — loop, re-check ctx (and re-attempt a claim)
 			}
 			return nil, fmt.Errorf("redisbroker: dequeue: %w", err)
 		}
@@ -103,6 +108,48 @@ func (b *Broker) Dequeue(ctx context.Context, queue string) (*taskq.Message, err
 		}
 		return &msg, nil
 	}
+}
+
+// tryClaimStale attempts to reclaim one stale pending entry from key's
+// consumer group via XAUTOCLAIM — one that's sat unacknowledged in some
+// consumer's Pending Entries List for at least cfg.claimMinIdle, meaning
+// that consumer most likely crashed (or hung) before Ack'ing or Nack'ing
+// it. It returns nil, nil if nothing was eligible to claim.
+//
+// It scans from the start of the PEL ("0-0") on every call rather than
+// tracking a cursor between calls, and claims at most one entry per call.
+// Both are deliberate: Dequeue's own loop already re-runs on a
+// cfg.blockTimeout cadence (see the BLOCK/redis.Nil branch above), so each
+// iteration gets its own fresh, cheap sweep for free — there's no need for
+// a stateful background reaper goroutine, which would also need something
+// to stop it. That fits this broker having no Close() and a caller-owned,
+// ctx-only lifecycle, the same way pgbroker's lease-expiry check runs
+// inline in Dequeue rather than as a separate process. A COUNT of 1 is
+// enough because XAUTOCLAIM scans the PEL in ID order (oldest-delivered
+// first), so the single oldest pending entry is exactly the one most
+// likely to be overdue — and Dequeue only wants one message per call
+// anyway.
+func (b *Broker) tryClaimStale(ctx context.Context, key string) (*taskq.Message, error) {
+	messages, _, err := b.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+		Stream:   key,
+		Group:    b.cfg.consumerGroup,
+		Consumer: b.cfg.consumerName,
+		MinIdle:  b.cfg.claimMinIdle,
+		Start:    "0-0",
+		Count:    1,
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redisbroker: claim stale: %w", err)
+	}
+	if len(messages) == 0 {
+		return nil, nil
+	}
+
+	msg, err := fieldsToMessage(messages[0].ID, messages[0].Values)
+	if err != nil {
+		return nil, fmt.Errorf("redisbroker: claim stale: decode entry %s: %w", messages[0].ID, err)
+	}
+	return &msg, nil
 }
 
 // Ack acknowledges and removes msg's stream entry. msg.ReceiptHandle must

@@ -1,5 +1,3 @@
-// redisbroker/options.go
-
 package redisbroker
 
 import (
@@ -16,6 +14,7 @@ type config struct {
 	consumerGroup string
 	consumerName  string
 	blockTimeout  time.Duration
+	claimMinIdle  time.Duration
 }
 
 func defaultConfig() config {
@@ -24,6 +23,7 @@ func defaultConfig() config {
 		consumerGroup: "taskq-workers",
 		consumerName:  uuid.NewString(),
 		blockTimeout:  5 * time.Second,
+		claimMinIdle:  30 * time.Second,
 	}
 }
 
@@ -41,17 +41,30 @@ func WithConsumerGroup(name string) Option {
 }
 
 // WithConsumerName overrides this Broker's consumer name within its group
-// — Redis uses it to track which consumer holds which pending entry.
+// — Redis uses it to track which consumer holds which pending entry, and
+// which consumer an XAUTOCLAIM-reclaimed entry gets reassigned to.
 // Default is a generated UUID; set this explicitly if you want stable
-// consumer identity across restarts (relevant once XCLAIM-based recovery
-// lands in a later phase).
+// consumer identity across restarts.
 func WithConsumerName(name string) Option {
 	return func(c *config) { c.consumerName = name }
 }
 
 // WithBlockTimeout overrides how long a single XREADGROUP call blocks
-// waiting for a new message before Dequeue loops and re-checks ctx.
-// Default 5s.
+// waiting for a new message before Dequeue loops and re-checks ctx (and,
+// as a side effect, re-attempts an XAUTOCLAIM sweep — see
+// WithClaimMinIdle). Default 5s.
 func WithBlockTimeout(d time.Duration) Option {
 	return func(c *config) { c.blockTimeout = d }
+}
+
+// WithClaimMinIdle sets how long an entry must sit unacknowledged in
+// another consumer's Pending Entries List — idle, per Redis's XAUTOCLAIM
+// semantics — before this Broker will reclaim it via XAUTOCLAIM,
+// redisbroker's equivalent of pgbroker's lease-based crash recovery. Set
+// it comfortably above your handler's expected worst-case runtime, or an
+// in-flight message risks being reclaimed and redelivered to a second
+// consumer while the first is still legitimately processing it. Default
+// 30s.
+func WithClaimMinIdle(d time.Duration) Option {
+	return func(c *config) { c.claimMinIdle = d }
 }
