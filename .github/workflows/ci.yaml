@@ -10,6 +10,7 @@ on:
 env:
   GO_VERSION: "1.26.x"
 
+
 permissions:
   contents: read
 
@@ -117,16 +118,13 @@ jobs:
           --health-cmd "pg_isready -U taskq"
           --health-interval 5s --health-timeout 3s --health-retries 10
     env:
-      TASKQ_REDIS_ADDR: localhost:6379
-      TASKQ_POSTGRES_DSN: postgres://taskq:taskq@localhost:5432/taskq_test?sslmode=disable
+      TASKQ_TEST_REDIS_ADDR: localhost:6379
+      TASKQ_TEST_POSTGRES_DSN: postgres://taskq:taskq@localhost:5432/taskq_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      # Mirrors `make test-conformance`. Fails until membroker/,
-      # redisbroker/, pgbroker/, taskqtest/ exist per the build order —
-      # that's expected, not a workflow bug, until phases 3–4 land.
       - run: go test -run TestConformance -v ./taskqtest/... ./membroker/... ./redisbroker/... ./pgbroker/...
 
   lint:
