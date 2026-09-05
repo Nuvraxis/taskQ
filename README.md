@@ -22,7 +22,8 @@ taskQ is early and evolving. What's shipping today:
 - ✅ Core types and the `Broker` contract
 - ✅ [`membroker`](membroker/) — an in-memory broker for local dev and tests
 - ✅ [`redisbroker`](redisbroker/) — a Redis Streams broker (consumer groups,
-  `ReceiptHandle`-based Ack/Nack); live-Redis tests are gated behind `-short`
+  `ReceiptHandle`-based Ack/Nack, `XAUTOCLAIM` crash recovery); live-Redis
+  tests are gated behind `-short`
 - ✅ [`pgbroker`](pgbroker/) — a Postgres broker (`SELECT … FOR UPDATE SKIP
   LOCKED`, lease-based visibility timeout with crash recovery, LISTEN/NOTIFY);
   live-Postgres tests are gated behind `-short`
@@ -31,8 +32,8 @@ taskQ is early and evolving. What's shipping today:
   `RecoveryMiddleware`, plus OpenTelemetry tracing in [`otelmw`](otelmw/))
 - ✅ [`taskqtest`](taskqtest/) — one shared conformance suite that all three
   brokers pass, so backends stay interchangeable
-- 🚧 Remaining polish: Redis crash-recovery (XCLAIM) and richer Pool
-  Ack/Nack observability — see the code's Phase-5 notes.
+- 🚧 Remaining polish: richer Pool Ack/Nack observability — see the code's
+  Phase-5 notes.
 
 ## Install
 
@@ -232,12 +233,15 @@ broker := redisbroker.New(client, redisbroker.WithConsumerGroup("workers"))
 | --- | --- | --- |
 | `WithKeyPrefix(p)` | `"taskq:"` | Prefix for stream keys — namespacing on a shared Redis. |
 | `WithConsumerGroup(name)` | `"taskq-workers"` | Consumer group; brokers sharing it compete for a stream's entries. |
-| `WithConsumerName(name)` | random UUID | This consumer's identity within the group (matters for future XCLAIM recovery). |
+| `WithConsumerName(name)` | random UUID | This consumer's identity within the group; also which consumer an `XAUTOCLAIM`-reclaimed entry is reassigned to. |
 | `WithBlockTimeout(d)` | `5s` | How long one `XREADGROUP` blocks before `Dequeue` re-checks the context. |
+| `WithClaimMinIdle(d)` | `30s` | Crash recovery threshold — how long an entry must sit unacknowledged in another consumer's Pending Entries List before `Dequeue` reclaims it via `XAUTOCLAIM`. |
 
 There's no `Close()`/`ErrQueueClosed`: cancel the context to stop a consumer.
-Crash safety is partial today — an unacked entry stays in the group's Pending
-Entries List, but automatic reclaim (XCLAIM) is not implemented yet.
+**Crash recovery is built in** — `Dequeue` opportunistically sweeps for one
+stale pending entry (idle past `WithClaimMinIdle`) via `XAUTOCLAIM` before
+falling back to reading new entries, so a crashed consumer's stranded work
+is redelivered automatically; no separate reaper process or ticker needed.
 
 ## Postgres broker
 
