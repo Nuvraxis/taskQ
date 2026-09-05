@@ -45,9 +45,12 @@ persistent backend:
 - **Ack/Nack target a `ReceiptHandle`.** `Dequeue` records the Redis Stream
   entry ID on the message; `Ack` (XACK + XDEL) and `Nack` (requeue as a new
   entry, then XACK/XDEL the old one) use it.
-- **Crash safety via the PEL.** An entry that's read but never acked stays in
-  the consumer group's Pending Entries List — recoverable later — rather than
-  being lost the way membroker's immediate-removal `Dequeue` would.
+- **Crash recovery is built in.** An entry a worker Dequeued but never Acked
+  stays in the consumer group's Pending Entries List; `Dequeue` sweeps for one
+  such stale entry (idle past `WithClaimMinIdle`, default 30s) via `XAUTOCLAIM`
+  before reading new entries, so a crashed consumer's work is redelivered
+  automatically — no separate reaper or ticker, the same shape as pgbroker's
+  lease expiry.
 
 The `pool` example's `Pool[T]` is deliberately near-identical to the
 [membroker `pool`](../membroker/pool/) one: that's the point of the shared
