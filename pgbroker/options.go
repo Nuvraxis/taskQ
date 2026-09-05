@@ -9,6 +9,7 @@ type config struct {
 	leaseDuration time.Duration
 	pollInterval  time.Duration
 	notifyChannel string
+	queuePrefix   string
 }
 
 func defaultConfig() config {
@@ -36,7 +37,9 @@ func WithLeaseDuration(d time.Duration) Option {
 // re-checking the table itself. NOTIFY makes the common case near-
 // instant; this is the fallback for a missed or never-delivered
 // notification (e.g. a lease expiring with no new Enqueue to trigger a
-// NOTIFY) — so the ceiling on how stale a wakeup can be. Default 200ms.
+// NOTIFY), or for a LISTEN/NOTIFY setup that never reaches the database at
+// all (see WithNotifyChannel's PgBouncer note) — so it's the ceiling on
+// how stale a wakeup can be. Default 200ms.
 func WithPollInterval(d time.Duration) Option {
 	return func(c *config) { c.pollInterval = d }
 }
@@ -49,4 +52,25 @@ func WithPollInterval(d time.Duration) Option {
 // unnecessarily. Default "taskq_new_message".
 func WithNotifyChannel(name string) Option {
 	return func(c *config) { c.notifyChannel = name }
+}
+
+// WithQueuePrefix namespaces every queue name this Broker touches with
+// prefix at the storage layer — all rows it writes carry prefix+queue in
+// the queue column, and Dequeue only ever looks for that same prefixed
+// value. A Message.Queue returned to the caller is still the plain,
+// unprefixed name passed in; the prefix is purely a storage-layer
+// namespace, invisible above the Broker boundary — the same role
+// redisbroker.WithKeyPrefix plays for stream keys.
+//
+// pgbroker needs this where redisbroker doesn't: Redis keys are already
+// isolated per queue by construction (one stream key each), so a prefix
+// there just avoids colliding with unrelated keys on a shared instance.
+// Every pgbroker queue instead lives in the same taskq_messages table, so
+// two Broker instances using bare queue names on one Postgres — e.g. two
+// taskqtest subtests both enqueuing to "roundtrip" — collide outright
+// without something to separate them. Chiefly useful for tests against a
+// shared database; most production deployments have one dedicated
+// database and don't need it.
+func WithQueuePrefix(prefix string) Option {
+	return func(c *config) { c.queuePrefix = prefix }
 }

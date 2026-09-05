@@ -40,6 +40,7 @@ help:
 	@echo "  test              go test ./... (no -race)"
 	@echo "  test-race         go test -race ./...   [Windows: see NOTE below]"
 	@echo "  test-conformance  run taskqtest suite against membroker+redisbroker+pgbroker"
+	@echo "  sqlc-generate     regenerate pgbroker/internal/sqlcgen from schema.sql+queries.sql"
 	@echo "  cover             coverage.out + coverage.html"
 	@echo "  bench             go test -bench=. -benchmem"
 	@echo "  vet               go vet ./..."
@@ -173,3 +174,18 @@ podman-run:
 clean:
 	$(GO) clean -cache -testcache
 	rm -rf coverage.out coverage.html
+
+
+
+# ---------------------------------------------------------------------
+# Code generation (sqlc)
+# ---------------------------------------------------------------------
+
+.PHONY: sqlc-generate
+sqlc-generate:
+	@command -v sqlc >/dev/null 2>&1 || { \
+		echo "installing sqlc..."; \
+		$(GO) install github.com/sqlc-dev/sqlc/cmd/sqlc@latest; \
+	}
+	cd pgbroker && sqlc generate
+
