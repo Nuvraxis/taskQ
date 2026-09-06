@@ -1,10 +1,11 @@
 # taskQ
 
 [![CI](https://github.com/Nuvraxis/taskQ/actions/workflows/ci.yaml/badge.svg)](https://github.com/Nuvraxis/taskQ/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/v/release/Nuvraxis/taskQ?sort=semver)](https://github.com/Nuvraxis/taskQ/releases/latest)
 [![Go Reference](https://pkg.go.dev/badge/github.com/Nuvraxis/taskQ.svg)](https://pkg.go.dev/github.com/Nuvraxis/taskQ)
-[![Go Report Card](https://goreportcard.com/badge/github.com/Nuvraxis/taskQ)](https://goreportcard.com/report/github.com/Nuvraxis/taskQ)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go 1.26+](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](go.mod)
+[![lint: golangci-lint](https://img.shields.io/badge/lint-golangci--lint-00ADD8)](.golangci.yaml)
 
 A small, type-safe task queue for Go, built around a deliberately tiny broker
 interface. Producers enqueue strongly-typed payloads; a pluggable broker
