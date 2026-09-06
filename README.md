@@ -32,6 +32,8 @@ taskQ is early and evolving. What's shipping today:
   `RecoveryMiddleware`, plus OpenTelemetry tracing in [`otelmw`](otelmw/))
 - ✅ [`taskqtest`](taskqtest/) — one shared conformance suite that all three
   brokers pass, so backends stay interchangeable
+- ✅ [`saga`](saga/) — durable multi-step workflows with automatic
+  compensation; needs no Broker/Pool changes, works over every backend
 - 🚧 Remaining polish: richer Pool Ack/Nack observability — see the code's
   Phase-5 notes.
 
@@ -57,6 +59,7 @@ side**, so a broker never needs to know about your payload types.
 | `Handler[T]` | `func(ctx, Task[T]) error`. Returning a non-nil error signals the task should be retried (subject to `MaxRetry`). |
 | `Pool[T]` | The consumer counterpart to `Queue[T]`: runs a `Handler[T]` against dequeued tasks with N workers, Acking successes and scheduling backoff `Nack`s for failures. Configure with `WithConcurrency` / `WithBackoffStrategy`. |
 | `Middleware[T]` | `func(Handler[T]) Handler[T]` — wraps a handler with cross-cutting behavior. Compose with `Chain`; built-ins: `LoggingMiddleware`, `RecoveryMiddleware`, and `otelmw.Middleware` for tracing. |
+| `Saga[S]` | A durable, multi-step workflow: `[]Step[S]` run in order, with automatic reverse-order compensation if a step fails permanently. Built on `Queue[Envelope[S]]` + `Pool[Envelope[S]]` — no Broker changes required. |
 
 ### Acknowledgement model
 
@@ -194,6 +197,10 @@ go run ./examples/redisbroker/pool
 # Postgres (needs Postgres on localhost:5432, or set TASKQ_POSTGRES_DSN)
 go run ./examples/pgbroker/basic
 go run ./examples/pgbroker/pool
+
+# Sagas (zero setup — uses membroker)
+go run ./examples/saga/basic        # happy path: reserve → charge → ship
+go run ./examples/saga/compensate   # a step fails, watch it roll back
 ```
 
 ## In-memory broker
@@ -289,6 +296,84 @@ docker run --rm -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
 - **PgBouncer** in transaction-pooling mode doesn't forward `LISTEN/NOTIFY`, so every wake-up degrades to the poll interval (correctness is unaffected — only latency).
 - **Admin methods** beyond the `Broker` interface: `QueueDepth`, `QueueDepthAvailable`, `PeekMessages`, `ReapExpiredLease`, `PurgeQueue`, `ListQueues`, `PurgeAll` — for monitoring and cleanup.
 
+## Sagas
+
+A [`saga`](saga/) is a durable multi-step workflow: steps run in order, and if
+one fails permanently after earlier steps already succeeded, those earlier
+steps are rolled back — their compensations run in reverse order. It's built
+entirely on the primitives above. A saga run is just a `Queue[Envelope[S]]`
+enqueuing to itself, one hop per step, so it needs no `Broker` or `Pool`
+changes and runs unmodified over membroker, redisbroker, or pgbroker.
+
+`Saga[S].Handler()` returns an ordinary `Handler[Envelope[S]]` that you run
+through an ordinary `Pool`. Each call processes exactly one hop — one step, in
+one direction — then returns; the next hop always lives in the queue, never in
+a goroutine's stack. That's what makes a saga survive a worker crash: a
+restarted worker simply dequeues wherever the run left off.
+
+Define the steps, hand `Handler()` to a `Pool`, and `Start` a run:
+
+```go
+type OrderState struct {
+	OrderID       string
+	ReservationID string // set by reserve, read by its Compensate
+	ChargeID      string // set by charge, read by its Compensate
+}
+
+steps := []saga.Step[OrderState]{
+	{
+		Name:       "reserve-inventory",
+		Do:         func(ctx context.Context, s *OrderState) error { s.ReservationID = "resv-" + s.OrderID; return nil },
+		Compensate: func(ctx context.Context, s *OrderState) error { /* release s.ReservationID */ return nil },
+	},
+	{
+		Name:       "charge-payment",
+		Do:         func(ctx context.Context, s *OrderState) error { s.ChargeID = "charge-" + s.OrderID; return nil },
+		Compensate: func(ctx context.Context, s *OrderState) error { /* refund s.ChargeID */ return nil },
+	},
+	{
+		Name: "ship-order",
+		Do:   func(ctx context.Context, s *OrderState) error { return ship(s) },
+		// No Compensate: the last step has nothing to undo. A nil Compensate
+		// is an automatic no-op if rollback ever reaches it.
+	},
+}
+
+sg := saga.New(broker, "orders", steps,
+	saga.WithOnComplete(func(ctx context.Context, id string, s OrderState) { /* finished */ }),
+	saga.WithOnFailed(func(ctx context.Context, id string, s OrderState, failedStep string, cause error) {
+		// failedStep/cause describe the step whose Do originally failed —
+		// even after rollback has unwound all the way back to step 0.
+	}),
+)
+
+// Drive it with an ordinary Pool — nothing saga-specific here.
+pool := taskq.NewPool(broker, "orders", sg.Handler())
+go pool.Run(ctx)
+
+sagaID, err := sg.Start(ctx, OrderState{OrderID: "order-1001"})
+```
+
+Semantics worth knowing:
+
+- **Steps run in order; compensation runs in reverse.** If step 2 of 3 fails
+  permanently, only the steps that actually succeeded (0 and 1) are
+  compensated, in reverse (1 then 0) — the failed step has nothing of its own
+  to undo. A step whose `Compensate` is `nil` is skipped as a no-op.
+- **The retry budget is per hop.** `WithMaxRetry(n)` (default 3) applies to
+  each individual `Do` or `Compensate` call — same `MaxRetry + 1`-attempts
+  semantics as the rest of taskQ — not to the run as a whole.
+- **Hooks report the real outcome.** `WithOnComplete` fires once every step's
+  `Do` succeeds. `WithOnFailed` fires when a run doesn't complete, always
+  reporting the step whose `Do` *originally* failed (not whichever
+  `Compensate` finished last). `WithOnCompensationFailed` fires when a
+  `Compensate` itself exhausts its retries — the one outcome a saga can't
+  resolve on its own, leaving the run partly rolled back. Treat it as
+  page-a-human, not log-and-continue.
+
+See [`examples/saga`](examples/saga/) for runnable happy-path and rollback
+demos.
+
 ## Development
 
 Common tasks are wrapped in the [`Makefile`](Makefile) (POSIX-shell first; on
@@ -303,20 +388,26 @@ make fmt       # gofmt -l -w .
 make lint      # golangci-lint run
 ```
 
-Run the examples with `go run` — or `make run EX=<path>`. The `membroker/*`
-examples need no setup; `redisbroker/*` needs a running Redis and `pgbroker/*`
-a running Postgres (`make deps-up`, or the `docker run` commands in each
-backend's README). See [`examples/`](examples/):
+Run the examples with `go run` — or `make run EX=<path>`. The `membroker/*` and
+`saga/*` examples need no setup; `redisbroker/*` needs a running Redis and
+`pgbroker/*` a running Postgres (`make deps-up`, or the `docker run` commands
+in each backend's README). See [`examples/`](examples/):
 
 ```sh
 go run ./examples/membroker/pool       # or: make run EX=membroker/pool
 go run ./examples/redisbroker/pool     # or: make run EX=redisbroker/pool
 go run ./examples/pgbroker/pool        # or: make run EX=pgbroker/pool
+go run ./examples/saga/compensate      # or: make run EX=saga/compensate
 ```
 
 CI runs build/vet/tidy, `go test -short`, the race detector, `golangci-lint`,
 and `govulncheck` across Linux, macOS, and Windows.
 
+## Need Support
+
+Questions, bug reports, or feature requests? Open an issue on the repository,
+or reach out to the maintainers at [hello@nuvraxis.com](mailto:hello@nuvraxis.com).
+
 ## License
 
-See the repository for license details.
+MIT — see [`LICENSE`](LICENSE).
