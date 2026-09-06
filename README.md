@@ -403,6 +403,11 @@ go run ./examples/saga/compensate      # or: make run EX=saga/compensate
 CI runs build/vet/tidy, `go test -short`, the race detector, `golangci-lint`,
 and `govulncheck` across Linux, macOS, and Windows.
 
+## Need Support
+
+Questions, bug reports, or feature requests? Open an issue on the repository,
+or reach out to the maintainers at [hello@nuvraxis.com](mailto:hello@nuvraxis.com).
+
 ## License
 
-See the repository for license details.
+MIT — see [`LICENSE`](LICENSE).
