@@ -49,7 +49,7 @@ func run() error {
 				return nil
 			},
 			Compensate: func(ctx context.Context, s *OrderState) error {
-				log.Printf("[%s] rolling back: releasing reservation %s", s.OrderID, s.ReservationID)
+				/* release s.ReservationID, keyed by saga.HopFromContext(ctx) */
 				return nil
 			},
 		},
@@ -61,7 +61,7 @@ func run() error {
 				return nil
 			},
 			Compensate: func(ctx context.Context, s *OrderState) error {
-				log.Printf("[%s] rolling back: refunding charge %s", s.OrderID, s.ChargeID)
+				/* refund s.ChargeID, keyed by saga.HopFromContext(ctx) */
 				return nil
 			},
 		},

@@ -19,6 +19,7 @@ From the repository root:
 ```sh
 go run ./examples/saga/basic
 go run ./examples/saga/compensate
+go run ./examples/saga/idempotent   # a Compensate retries without refunding twice
 ```
 
 `compensate`'s output shows the pivot from forward to rollback:
@@ -47,5 +48,13 @@ saga … failed at "ship-order": carrier API unavailable — every prior step ha
   with nothing to undo is skipped as an automatic no-op during rollback.
 - **Per-hop retries.** `compensate` passes `WithMaxRetry(0)` to give up on the
   first failed attempt and keep the demo short; the default is 3.
+- **Compensate must be safe to run twice.** A hop is retried as a whole and
+    can be redelivered after a crash, so a refund or release that isn't
+    naturally idempotent needs a dedup key. `saga.HopFromContext(ctx)` returns
+    the saga ID, step index and direction of the hop currently executing;
+    `Hop.Key()` is stable across retries and redeliveries, so hand it to your
+    provider as the idempotency key or use it as a unique column in your own
+    "already reversed" table. State is requeued verbatim on retry, so a flag
+    written into `S` mid-attempt is not a substitute.
 
 See the root [README](../../README.md#sagas) for the full walkthrough.
