@@ -9,7 +9,6 @@ import (
 // which saga run, which step, and in which direction. The triple is stable
 // across retries and crash redeliveries of the same hop, which makes it a
 // ready-made idempotency key for side effects inside Do and Compensate.
-
 type Hop struct {
 	SagaID    string
 	StepIndex int

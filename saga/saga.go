@@ -84,7 +84,11 @@ func (s *Saga[S]) Handler() taskq.Handler[Envelope[S]] {
 			return nil
 		}
 		step := s.steps[env.StepIndex]
-
+		ctx = withHop(ctx, Hop{
+			SagaID:    env.SagaID,
+			StepIndex: env.StepIndex,
+			Direction: env.Direction,
+		})
 		switch env.Direction {
 		case Forward:
 			return s.handleForward(ctx, task, env, step)
