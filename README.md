@@ -41,7 +41,10 @@ taskQ is early and evolving. What's shipping today:
   brokers pass, so backends stay interchangeable
 - ✅ [`saga`](saga/): durable multi-step workflows with automatic
   compensation; needs no Broker/Pool changes, works over every backend
-- 🚧 Remaining polish: richer Pool Ack/Nack observability, still in progress.
+- ✅ `Pool` failure reporting: `WithOnDecodeError` and `WithOnSettleError`
+  surface undecodable payloads and failed Ack/Nack calls, and Ack/Nack run on
+  a context detached from shutdown (`WithSettleTimeout`, default 5s), so a
+  task that finishes during shutdown isn't redelivered
 
 ## How taskQ compares
 
@@ -90,7 +93,7 @@ side**, so a broker never needs to know about your payload types.
 | `Queue[T]` | Binds a broker to a queue name and a payload type `T`. `Enqueue` marshals `T` to JSON and hands a `Message` to the broker. |
 | `Task[T]` | A `Message` with its `Payload` decoded back into `T`, the thing a `Handler[T]` actually receives. |
 | `Handler[T]` | `func(ctx, Task[T]) error`. Returning a non-nil error signals the task should be retried (subject to `MaxRetry`). |
-| `Pool[T]` | The consumer counterpart to `Queue[T]`: runs a `Handler[T]` against dequeued tasks with N workers, Acking successes and scheduling backoff `Nack`s for failures. Configure with `WithConcurrency` / `WithBackoffStrategy`. |
+| `Pool[T]` | The consumer counterpart to `Queue[T]`: runs a `Handler[T]` against dequeued tasks with N workers, Acking successes and scheduling backoff `Nack`s for failures. Configure with `WithConcurrency` / `WithBackoffStrategy` / `WithSettleTimeout`. Failures that happen outside your handler (a payload that won't decode, a failed `Ack`/`Nack`) are reported through the `WithOnDecodeError` / `WithOnSettleError` hooks. |
 | `Middleware[T]` | `func(Handler[T]) Handler[T]`, wrapping a handler with cross-cutting behavior. Compose with `Chain`; built-ins: `LoggingMiddleware`, `RecoveryMiddleware`, and `otelmw.Middleware` for tracing. |
 | `Saga[S]` | A durable, multi-step workflow: `[]Step[S]` run in order, with automatic reverse-order compensation if a step fails permanently. Built on `Queue[Envelope[S]]` + `Pool[Envelope[S]]`, with no Broker changes required. |
 
@@ -183,7 +186,7 @@ pool := taskq.NewPool(broker, "emails", handler,
 )
 
 // Run blocks until ctx is cancelled or the broker is closed, then waits for
-// in-flight handlers to finish.
+// in-flight handlers, and the Ack that follows each one, to finish.
 if err := pool.Run(ctx); err != nil {
 	log.Fatal(err)
 }
@@ -210,6 +213,45 @@ handler := taskq.Chain[EmailJob](
 	taskq.RecoveryMiddleware[EmailJob](),
 )
 ```
+
+**Reporting failures outside the handler.** Two kinds of failure happen
+where your handler can't see them, and `Run` doesn't return them either:
+
+- A payload that won't decode into `T`. The Pool acks and drops it, because
+  it would never decode on redelivery.
+- An `Ack` or `Nack` the broker rejects. A failed `Ack` usually means the
+  broker redelivers the task once its lease or idle window expires. A failed
+  `Nack` means that scheduled retry is lost.
+
+Both are silent unless you register a hook. Wiring them to `slog`:
+
+```go
+logger := slog.Default()
+
+pool := taskq.NewPool(broker, "emails", handler,
+	taskq.WithOnDecodeError(func(ctx context.Context, msg taskq.Message, err error) {
+		logger.ErrorContext(ctx, "dropping undecodable task",
+			"task_id", msg.ID, "queue", msg.Queue, "error", err)
+	}),
+	taskq.WithOnSettleError(func(ctx context.Context, op string, msg taskq.Message, err error) {
+		// op is taskq.SettleOpAck or taskq.SettleOpNack.
+		logger.ErrorContext(ctx, "task settle failed",
+			"op", op, "task_id", msg.ID, "queue", msg.Queue,
+			"attempts", msg.Attempts, "error", err)
+	}),
+	taskq.WithSettleTimeout(10*time.Second), // default 5s
+)
+```
+
+**Shutdown doesn't cancel settlement.** `Ack` and `Nack` run on a context
+that keeps `Run`'s values (a trace span, say) but not its cancellation,
+bounded by `WithSettleTimeout`. A handler that finishes after you cancel
+`Run`'s ctx still gets its `Ack`, instead of failing it on the dead context
+and having pgbroker or redisbroker redeliver the task later. `Run` waits for
+that `Ack` before returning. Hooks get the same never-cancelled context.
+`WithOnSettleError` can fire after `Run` returns, because a scheduled
+retry's `Nack` is fire-and-forget, so don't tear down anything a hook
+depends on when you shut down.
 
 See [`examples/`](examples/) for complete, runnable programs covering the
 worker pool, middleware, and exponential-backoff retries. The in-memory set
