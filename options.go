@@ -97,8 +97,9 @@ func WithOnDecodeError(fn func(ctx context.Context, msg Message, err error)) Poo
 // scheduled retry was lost. Default: no-op.
 //
 // ctx carries the values of the ctx passed to Run but is never canceled.
-// For a scheduled Nack the callback may fire after Run has returned. A nil
-// fn is ignored.
+// The callback may fire after Run has returned, because scheduled Nacks are
+// fire-and-forget, so implementations must not depend on resources torn
+// down at shutdown. A nil fn is ignored.
 func WithOnSettleError(fn func(ctx context.Context, op string, msg Message, err error)) PoolOption {
 	return func(c *poolConfig) {
 		if fn != nil {
